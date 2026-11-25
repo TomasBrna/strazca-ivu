@@ -2,11 +2,17 @@ name: Strážca hlášky IVU
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # každých 15 minút (čas UTC, GitHub môže občas pár minút meškať)
+    - cron: '*/5 * * * *'    # kontrola každých 5 minút (GitHub môže občas pár minút meškať)
+    - cron: '0 6 * * *'      # denný prehľad – 8:00 v lete (UTC+2)
+    - cron: '0 7 * * *'      # denný prehľad – 8:00 v zime (UTC+1)
   workflow_dispatch:
     inputs:
       test:
         description: 'Testovací poplach (pošle skúšobné upozornenie)'
+        type: boolean
+        default: false
+      denny:
+        description: 'Poslať denný prehľad hneď'
         type: boolean
         default: false
 
@@ -15,7 +21,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: strazca
+  group: strazca-${{ github.event.schedule || 'rucne' }}
   cancel-in-progress: false
 
 jobs:
@@ -71,13 +77,55 @@ jobs:
           } > telo.md
           gh issue create --repo "$GITHUB_REPOSITORY" --title "$NAZOV" --body-file telo.md
 
-      - name: Uloženie nového stavu
-        if: steps.kontrola.outputs.ulozit == 'true'
+      - name: Denný prehľad o 8:00
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          PLAN: ${{ github.event.schedule }}
+          RUCNE: ${{ inputs.denny == true }}
+          TERAZ: ${{ steps.kontrola.outputs.teraz }}
+          DETAIL: ${{ steps.kontrola.outputs.detail }}
+          ZMENA: ${{ steps.kontrola.outputs.zmena }}
         run: |
+          DNES=$(TZ=Europe/Bratislava date +%Y-%m-%d)
+          HODINA=$(TZ=Europe/Bratislava date +%-H)
+          POSLEDNY=$(cat posledny-denny-prehlad.txt 2>/dev/null || true)
+          if [ "$RUCNE" != "true" ]; then
+            # Len pri ranných plánoch, od 8:00 miestneho času a najviac raz za deň
+            if [ "$PLAN" != "0 6 * * *" ] && [ "$PLAN" != "0 7 * * *" ]; then exit 0; fi
+            if [ "$HODINA" -lt 8 ] || [ "$POSLEDNY" = "$DNES" ]; then exit 0; fi
+          fi
+          if [ -z "$TERAZ" ]; then TERAZ="(web sa pri tejto kontrole nepodarilo načítať)"; fi
+          NAZOV="📅 Denný prehľad strážcu IVU"
+          CISLO=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$NAZOV\" in:title" --json number --jq '.[0].number')
+          if [ -z "$CISLO" ]; then
+            URL=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$NAZOV" \
+              --body "Sem každé ráno o 8:00 pribudne prehľad. Toto issue nechaj otvorené.")
+            CISLO=${URL##*/}
+          fi
+          if [ "$ZMENA" = "true" ]; then STAV="⚠️ hláška sa práve zmenila (prišlo aj samostatné upozornenie)"; else STAV="bez zmeny"; fi
+          {
+            echo "@$OWNER denný prehľad – $(TZ=Europe/Bratislava date '+%d.%m.%Y %H:%M')"
+            echo
+            echo "**Hláška na webe:** $TERAZ"
+            echo
+            echo "**Stav:** $STAV"
+            echo
+            echo "**Text pod hláškou:** $DETAIL"
+            echo
+            echo "Strážca beží a kontroluje https://vzdelavamsa.iedu.sk/ každých 5 minút."
+          } > prehlad.md
+          gh issue comment "$CISLO" --repo "$GITHUB_REPOSITORY" --body-file prehlad.md
+          if [ "$RUCNE" != "true" ]; then echo "$DNES" > posledny-denny-prehlad.txt; fi
+
+      - name: Uloženie nového stavu
+        run: |
+          for f in posledna-hlaska.txt posledny-denny-prehlad.txt; do [ -f "$f" ] && git add "$f"; done
+          if git diff --cached --quiet; then exit 0; fi
           git config user.name "strazca-ivu"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add posledna-hlaska.txt
-          git commit -m "Nová hláška: $(head -c 200 posledna-hlaska.txt)"
+          git commit -m "Stav strážcu: $(head -c 200 posledna-hlaska.txt)"
+          git pull --rebase --quiet
           git push
 
       - name: Udržanie strážcu nažive
