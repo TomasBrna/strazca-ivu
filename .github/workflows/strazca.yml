@@ -1,0 +1,93 @@
+name: Strážca hlášky IVU
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # každých 15 minút (čas UTC, GitHub môže občas pár minút meškať)
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Testovací poplach (pošle skúšobné upozornenie)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: strazca
+  cancel-in-progress: false
+
+jobs:
+  kontrola:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Inštalácia
+        run: npm install --no-audit --no-fund
+
+      - name: Kontrola webu
+        id: kontrola
+        env:
+          TEST: ${{ inputs.test == true }}
+        run: node strazca.mjs
+
+      - name: Upozornenie (GitHub pošle e-mail)
+        if: steps.kontrola.outputs.zmena == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          TEST: ${{ inputs.test == true }}
+          PREDTYM: ${{ steps.kontrola.outputs.predtym }}
+          TERAZ: ${{ steps.kontrola.outputs.teraz }}
+          DETAIL: ${{ steps.kontrola.outputs.detail }}
+          DATUM: ${{ steps.kontrola.outputs.datum }}
+        run: |
+          if [ "$TEST" = "true" ]; then
+            NAZOV="🧪 TEST strážcu IVU – upozornenia fungujú"
+          elif [ "$DATUM" = "áno" ]; then
+            NAZOV="🔔 IVU: hláška sa zmenila na DÁTUM – $TERAZ"
+          else
+            NAZOV="🔔 IVU: hláška sa zmenila – $TERAZ"
+          fi
+          {
+            echo "@$OWNER hláška na https://vzdelavamsa.iedu.sk/ sa zmenila."
+            echo
+            echo "**Predtým:** $PREDTYM"
+            echo
+            echo "**Teraz:** $TERAZ"
+            echo
+            echo "**Obsahuje dátum / číslo:** $DATUM"
+            echo
+            echo "**Text pod hláškou:** $DETAIL"
+            echo
+            echo "Zistené: $(TZ=Europe/Bratislava date '+%d.%m.%Y %H:%M')"
+          } > telo.md
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$NAZOV" --body-file telo.md
+
+      - name: Uloženie nového stavu
+        if: steps.kontrola.outputs.ulozit == 'true'
+        run: |
+          git config user.name "strazca-ivu"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add posledna-hlaska.txt
+          git commit -m "Nová hláška: $(head -c 200 posledna-hlaska.txt)"
+          git push
+
+      - name: Udržanie strážcu nažive
+        # GitHub vypne plánované spúšťanie po 60 dňoch bez zmien v repozitári.
+        run: |
+          POSLEDNY=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - POSLEDNY )) -gt $(( 45 * 86400 )) ]; then
+            git config user.name "strazca-ivu"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git pull --rebase --quiet
+            git commit --allow-empty -m "Strážca stále beží"
+            git push
+          fi
